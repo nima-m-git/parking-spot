@@ -12,18 +12,15 @@ import postgres_to_pandas as ptp
 invalid = 'That is not a valid input. Try again.\n'
 hours = [str(_).zfill(2) for _ in range(0,24)]
 
-def is_valid(inp, condition, error=None):
+def is_valid(inp, condition, error=invalid):
     while True:
         entry = input(inp)
         if condition(entry):
             break
         else:
-            if error:
-                print(error)
+            print(error)
             continue
     return entry
-
-
 
 try:
     connection = psycopg2.connect(
@@ -63,13 +60,14 @@ class Entry():
  
     def create_entry():
         ''' user input to fill entries '''
-        while True: 
+        spot = is_valid('\nWhat is the parking spot?\n', lambda spot: 0 < len(spot) <= 5, error='5 char limit.')
+        '''while True: 
             spot = input('\nWhat is the parking spot?\n')
             if 0 < len(spot) <= 5:
                 break
             else:
                 print('5 char limit.')
-                continue
+                continue'''
 
         while True:
             empty = input('\nWas it empty? Enter "True" or "False"\n').title()
@@ -177,15 +175,6 @@ class Statistics():
         ''' present spot with the highest probability at user given time'''
         time = is_valid(inp=("What time(hour) do you want to find the best probabilities for?\n"), 
                             condition = lambda time: time.zfill(2) in hours, error = ('That is not a valid time.'))
-          
-        '''while True:
-            time = input("What time(hour) do you want to find the best probabilities for?\n").zfill(2)
-            if time in hours:
-                break
-            else:
-                print('That is not a valid time.')
-                continue'''
-
         query_max_prob = ('''SELECT SPOT, PROBABILITY, STD, ENTRIES FROM parking_spot_stats WHERE TIME = {} ORDER BY PROBABILITY DESC'''.format(time))
         cur.execute(query_max_prob)
         top_five = cur.fetchall()[:5]
@@ -328,7 +317,7 @@ class Statistics():
                     ticks='outside',
                     tick0=0,
                     dtick=1,
-                    range=[0,23]
+                    range=[-.5,23.5]
                     ),
                 yaxis=dict(
                     tickmode='linear',
@@ -351,7 +340,7 @@ class Statistics():
 
 
 
-Statistics.best_prob_for_time()
+Entry.create_entry()
 
 
 
