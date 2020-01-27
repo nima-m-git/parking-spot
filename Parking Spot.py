@@ -4,7 +4,26 @@
 
 # connect to postgres database with psycopg2
 import psycopg2
-from psycopg2 import sql
+import itertools
+import plotly.express as px
+import plotly.graph_objects as go
+import postgres_to_pandas as ptp
+
+invalid = 'That is not a valid input. Try again.\n'
+hours = [str(_).zfill(2) for _ in range(0,24)]
+
+def is_valid(inp, condition, error=None):
+    while True:
+        entry = input(inp)
+        if condition(entry):
+            break
+        else:
+            if error:
+                print(error)
+            continue
+    return entry
+
+
 
 try:
     connection = psycopg2.connect(
@@ -17,7 +36,7 @@ except:
     ('Could not connect to Database.')
 cur = connection.cursor()
 
-hours = [str(_).zfill(2) for _ in range(0,24)]
+
 
 class Tables():
     table_entries = '''CREATE TABLE "parking_spot_entries" (
@@ -27,13 +46,13 @@ class Tables():
                         TIME    INTEGER CHECK (TIME BETWEEN 0 and 24)
                         );'''
     
-    table_status = '''CREATE TABLE "parking_spot_stats" (
+    table_stats = '''CREATE TABLE "parking_spot_stats" (
                         ID                         SERIAL PRIMARY KEY,
                         SPOT                      VARCHAR(5) NOT NULL,
                         TIME    INTEGER CHECK (TIME BETWEEN 0 and 24),
-                        EMPTY_PROB                       NUMERIC(3,2),
+                        PROBABILITY                      NUMERIC(3,2),
                         ENTRIES                               INTEGER,
-                        STD                               NUMERIC(3,2)               
+                        STD                              NUMERIC(4,3)               
                         );'''
     def create_table(create_table_query):
         cur.execute(create_table_query)
@@ -41,8 +60,7 @@ class Tables():
 
 
 class Entry():
-    invalid = 'That is not a valid input. Try again.\n'
-    
+ 
     def create_entry():
         ''' user input to fill entries '''
         while True: 
@@ -121,33 +139,220 @@ class Entry():
                 print(invalid)
                 continue
 
-# retrieves all spot names
-cur.execute('SELECT DISTINCT spot FROM parking_spot_entries')
-spot_list = cur.fetchall()              
+    def add_stats():
+        '''Calculates probability and STD for each spot, time, and inserts into new table stats'''
+        # retrieves all spot names
+        cur.execute('SELECT DISTINCT spot FROM parking_spot_entries')
+        spot_list = cur.fetchall()            
 
-# counts time each spot and time is avail
-for spot in spot_list:
-    for hour in hours:
-        cur.execute("SELECT COUNT(*) FROM parking_spot_entries WHERE SPOT = (%s) AND TIME = (%s) AND EMPTY = true",
-                    (spot, hour))
-        empty_count = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM parking_spot_entries WHERE SPOT = (%s) AND TIME = (%s)", (spot, hour))
-        total_count = int(cur.fetchone()[0])
-        # if there are no entries, probability and std are null
-        if total_count:
-            # calculate probability of spot being empty at given time 
-            probability = empty_count/total_count
-            P, TC = probability, total_count
-            # calculate binomial distribution standard deviation for the probability
-            STD = (P*(1-P)/TC)**0.5
-        else:
-            probability, STD = None, None
+        # counts time each spot and time is avail
+        for spot in spot_list:
+            for hour in hours:
+                cur.execute("SELECT COUNT(*) FROM parking_spot_entries WHERE SPOT = (%s) AND TIME = (%s) AND EMPTY = true",
+                            (spot, hour))
+                empty_count = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM parking_spot_entries WHERE SPOT = (%s) AND TIME = (%s)", (spot, hour))
+                total_count = int(cur.fetchone()[0])
+                # if there are no entries, probability and std are null
+                if total_count:
+                    probability = empty_count/total_count
+                    STD = (probability*(1-probability)/total_count)**0.5
 
-        entry_query = '''INSERT INTO "parking_spot_stats" (SPOT, TIME, EMPTY_PROB, ENTRIES, STD) 
-                VALUES (%s, %s, %s, %s, %s)'''
-        entry_insert = (spot, hour, P, TC, STD)
-        cur.execute(entry_query, entry_insert)
-        connection.commit()
-    
+                entry_query = '''INSERT INTO "parking_spot_stats" (SPOT, TIME, PROBABILITY, ENTRIES, STD) 
+                        VALUES (%s, %s, %s, %s, %s)'''
+                entry_insert = (spot, hour, probability, total_count, STD)
+                cur.execute(entry_query, entry_insert)
+                connection.commit()
+
+    def update_stats():
+        '''Drops existing stats table, recreates and populates from new entries'''
+        cur.execute('DROP TABLE parking_spot_stats')
+        Tables.create_table(table_stats)
+        add_stats()
+        
+
+class Statistics():
+
+    def best_prob_for_time():
+        ''' present spot with the highest probability at user given time'''
+        time = is_valid(inp=("What time(hour) do you want to find the best probabilities for?\n"), 
+                            condition = lambda time: time.zfill(2) in hours, error = ('That is not a valid time.'))
+          
+        '''while True:
+            time = input("What time(hour) do you want to find the best probabilities for?\n").zfill(2)
+            if time in hours:
+                break
+            else:
+                print('That is not a valid time.')
+                continue'''
+
+        query_max_prob = ('''SELECT SPOT, PROBABILITY, STD, ENTRIES FROM parking_spot_stats WHERE TIME = {} ORDER BY PROBABILITY DESC'''.format(time))
+        cur.execute(query_max_prob)
+        top_five = cur.fetchall()[:5]
+        print(f'At time {time}Hs, the spots with the highest probability of being empty are:\n')
+        for i in range(5):
+            spot, probability, STD, entries = top_five[i]
+            print(f"\nSpot: {spot},\tProbability: {probability},\tSTD: {STD},\tEntries: {entries}")
+
+
+    def prob_of_spots_per_time_visual():
+        ''' present graph of probability of spots for user selected time'''
+        time = input("What time(hour) do you want to view the spot's probabilities for?\n").zfill(2)
+        query = ('SELECT SPOT, PROBABILITY, STD, ENTRIES FROM parking_spot_stats WHERE TIME = {}'.format(time))
+        # graph using plotly
+        data = ptp.query_to_df(query)
+        fig = px.bar(data, x='spot', y='probability', error_y='std',
+                    color='probability', color_continuous_scale='purp',
+                    plot_bgcolor='rgba(0,0,0,0)', 
+                    hover_data=['entries'],              
+        )
+        fig.update_layout(
+                title={
+                    'text':'{}Hs'.format(time),
+                    'y':0.95,
+                    'x':0.5,
+                    'font':{
+                        'size': 28},
+                    },
+                xaxis_title="Spot",
+                yaxis_title="Probability",
+                font=dict(
+                    family="Courier New, monospace",
+                    size=16,
+                    color="#000000"
+                    ),
+            )
+        fig.show()
+
+
+    def spots_prob_change_over_time_visual():
+        ''' present change of probability for all spots over time '''
+        # ask user which spots they would like to view
+        while True:
+            selected_spots = input('\nWhich spot(s) would you like to view? Enter "all" for all.\nEnter "spots" for a list of spots.\n').lower()
+            cur.execute('SELECT DISTINCT spot FROM parking_spot_stats')
+            spots = [s[0] for s in cur.fetchall()]
+            count = 1
+            if selected_spots == 'spots':
+                print(spots)
+                continue
+            elif selected_spots == 'all':
+                data = ptp.table_to_df('parking_spot_stats')
+                break
+            elif selected_spots in spots:
+                many = None
+                while True:
+                    another = input('Add another spot? Enter y/n.\n').lower()
+                    if another == 'n':
+                        many = 0
+                        break
+                    elif another == 'y':
+                        selected_spots = list(selected_spots)
+                        while True:
+                            many = input('How many more spots would you like to add?\n')
+                            # check input is valid
+                            try:
+                                many = int(many)
+                                if 0 <= many < len(spots):
+                                    break
+                                else:
+                                    print(f'You can only add between 0 and {len(spots)-1} more spots.\n')
+                                    continue
+                            except ValueError:
+                                print('That is not a valid integer.\n')
+                                continue
+                        # add 'many' input spots to list
+                        for i in range(int(many)):
+                            while True:
+                                new_spot = (input('Enter spot:\t'))
+                                remaining_spots = [spot for spot in spots if spot not in selected_spots]
+                                # repitition not allowed
+                                if new_spot in selected_spots:
+                                    inp = input('''You have already entered that spot, try another.\nTo view chosen spots, enter "view".
+                                                To view remaining spots, enter "spots". Any other key to continue.\n''')
+                                    if inp == 'view':
+                                        print(selected_spots)
+                                    if inp == 'spots':
+                                        print(remaining_spots)
+                                    continue
+                                elif new_spot in spots:
+                                    selected_spots.append(new_spot)
+                                    break
+                                else:
+                                    print('That is not a valid spot.\n')
+                                    if input('Do you want to view available spots? Enter "y", or another key to try again.\n').lower() == 'y':
+                                        print(remaining_spots)
+                                    continue
+                        break
+                    else:
+                        print(invalid)
+                        continue
+                if (count+many)>1:
+                    query = ('SELECT SPOT, PROBABILITY, TIME, STD, ENTRIES FROM parking_spot_stats WHERE SPOT IN {}'.format(tuple(selected_spots)))
+                else:
+                    # cast needed when single value passed to avoid type error
+                    query = ('SELECT SPOT, PROBABILITY, TIME, STD, ENTRIES FROM parking_spot_stats WHERE SPOT = (SELECT CAST({} AS VARCHAR))'.format(selected_spots))
+                data = ptp.query_to_df(query)
+                break         
+            else:
+                print(invalid)
+                continue
+            
+        fig = px.scatter(data,
+                        x='time', 
+                        y='probability', 
+                        hover_name='spot',
+                        color='spot', 
+                        hover_data=['entries', 'std'], 
+                        size='std', 
+                        # find way to scale size, reverse     
+                    )       
+        fig.update_traces(mode='lines+markers')          
+        fig.update_layout(
+                title={
+                    'text':'Spots\' Probabiliy change over Time',
+                    'y':0.95,
+                    'x':0.5,
+                    'font':{
+                        'size': 28},
+                    },
+                xaxis_title="Time (Hours)",
+                yaxis_title="Probability",
+                font=dict(
+                    family="Courier New, monospace",
+                    size=16,
+                    color="#000000"
+                    ),
+                xaxis=dict(
+                    tickmode='linear',
+                    ticks='outside',
+                    tick0=0,
+                    dtick=1,
+                    range=[0,23]
+                    ),
+                yaxis=dict(
+                    tickmode='linear',
+                    ticks='outside',
+                    tick0=0,
+                    dtick=0.25,
+                    range=[-0.01, 1.01]
+                    ),
+                legend=go.layout.Legend(
+                    traceorder="normal",
+                    bordercolor="Black",
+                    borderwidth=1
+                    ),
+                #paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                #height=500
+            )   
+        fig.show()
+
+
+
+
+Statistics.best_prob_for_time()
+
+
 
 
